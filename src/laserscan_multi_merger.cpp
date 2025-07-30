@@ -43,7 +43,9 @@ private:
 	std::vector<pcl::PCLPointCloud2> clouds;
 	std::vector<string> input_topics;
 
-	void laserscan_topic_parser();
+	std::vector<std::string> splitSources(std::string sourceString);
+	//void laserscan_topic_parser();
+	void createSubscribers();
 
 	double angle_min;
 	double angle_max;
@@ -89,10 +91,10 @@ LaserscanMerger::LaserscanMerger() : Node("laserscan_multi_merger")
 	tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
 	tfListener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-	this->laserscan_topic_parser();
-
 	point_cloud_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_destination_topic.c_str(), rclcpp::SensorDataQoS());
 	laser_scan_publisher_ = this->create_publisher<sensor_msgs::msg::LaserScan>(scan_destination_topic.c_str(), rclcpp::SensorDataQoS());
+
+	this->createSubscribers();
 }
 
 rcl_interfaces::msg::SetParametersResult LaserscanMerger::reconfigureCallback(const std::vector<rclcpp::Parameter> &parameters)
@@ -144,65 +146,35 @@ rcl_interfaces::msg::SetParametersResult LaserscanMerger::reconfigureCallback(co
 	return result;
 }
 
-void LaserscanMerger::laserscan_topic_parser()
+std::vector<std::string> LaserscanMerger::splitSources(std::string sourceString)
 {
-	// LaserScan topics to subscribe
-	std::map<std::string, std::vector<std::string>> topics;
-
-	istringstream iss(laserscan_topics);
-	set<string> tokens;
-	copy(istream_iterator<string>(iss), istream_iterator<string>(), inserter<set<string>>(tokens, tokens.begin()));
-	std::vector<string> tmp_input_topics;
-
-	while (!tokens.empty())
-	{
-		RCLCPP_INFO(this->get_logger(), "Waiting for topics ...");
-		sleep(1);
-
-		topics = this->get_topic_names_and_types();
-
-		for (const auto &topic_it : topics)
-		{
-			std::vector<std::string> topic_types = topic_it.second;
-
-			if (std::find(topic_types.begin(), topic_types.end(), "sensor_msgs/msg/LaserScan") != topic_types.end() && tokens.erase(topic_it.first) > 0)
-			{
-				tmp_input_topics.push_back(topic_it.first);
-			}
-		}
+	std::vector<std::string> vector;
+	std::string delimiter = " ";
+	size_t pos = 0;
+	while ((pos = sourceString.find(delimiter)) != std::string::npos) {
+		auto temp = sourceString.substr(0, pos);
+		vector.push_back(temp);
+		sourceString.erase(0, pos + delimiter.length());
 	}
+	vector.push_back(sourceString);
+	return vector;
+}
 
-	sort(tmp_input_topics.begin(), tmp_input_topics.end());
-	std::vector<string>::iterator last = std::unique(tmp_input_topics.begin(), tmp_input_topics.end());
-	tmp_input_topics.erase(last, tmp_input_topics.end());
-
-	// Do not re-subscribe if the topics are the same
-	if ((tmp_input_topics.size() != input_topics.size()) || !equal(tmp_input_topics.begin(), tmp_input_topics.end(), input_topics.begin()))
-	{
-		input_topics = tmp_input_topics;
-
-		if (input_topics.size() > 0)
+void LaserscanMerger::createSubscribers()
+{
+	try {
+		input_topics = splitSources(laserscan_topics);
+		for (std::vector<int>::size_type i = 0; i < input_topics.size(); ++i)
 		{
-			scan_subscribers.resize(input_topics.size());
-			clouds_modified.resize(input_topics.size());
-			clouds.resize(input_topics.size());
-			RCLCPP_INFO(this->get_logger(), "Subscribing to topics\t%ld", scan_subscribers.size());
-			for (std::vector<int>::size_type i = 0; i < input_topics.size(); ++i)
-			{
-				// workaround for std::bind https://github.com/ros2/rclcpp/issues/583
-				std::function<void(const sensor_msgs::msg::LaserScan::SharedPtr)> callback =
-						std::bind(
-								&LaserscanMerger::scanCallback,
-								this, std::placeholders::_1, input_topics[i]);
-				scan_subscribers[i] = this->create_subscription<sensor_msgs::msg::LaserScan>(input_topics[i].c_str(), rclcpp::SensorDataQoS(), callback);
-				clouds_modified[i] = false;
-				cout << input_topics[i] << " ";
-			}
+			// workaround for std::bind https://github.com/ros2/rclcpp/issues/583
+			std::function<void(const sensor_msgs::msg::LaserScan::SharedPtr)> callback =
+					std::bind(&LaserscanMerger::scanCallback,this, std::placeholders::_1, input_topics[i]);
+			scan_subscribers[i] = this->create_subscription<sensor_msgs::msg::LaserScan>(input_topics[i].c_str(), rclcpp::SensorDataQoS(), callback);
+			clouds_modified[i] = false;
+			cout << input_topics[i] << " ";
 		}
-		else
-		{
-			RCLCPP_INFO(this->get_logger(), "Not subscribed to any topic.");
-		}
+	} catch (const std::exception& e) {
+		RCLCPP_INFO(this->get_logger(), "Exception while creating subscribers {}", e.what());
 	}
 }
 
@@ -328,9 +300,10 @@ void LaserscanMerger::pointcloud_to_laserscan(Eigen::MatrixXf points, pcl::PCLPo
 
 int main(int argc, char **argv)
 {
-	rclcpp::init(argc, argv);
 
-	rclcpp::spin(std::make_shared<LaserscanMerger>());
+	auto ira_laser_scan_node = std::make_shared<LaserscanMerger>();
+
+	rclcpp::spin(ira_laser_scan_node->get_node_base_interface());
 
 	rclcpp::shutdown();
 
